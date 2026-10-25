@@ -1,4 +1,4 @@
-/* 检测参数质控助手 —— 纯前端 PWA，无构建步骤、无后端、数据存本地 IndexedDB。
+/* 我的检测参数 —— 纯前端 PWA，无构建步骤、无后端、数据存本地 IndexedDB。
    页面：主页面(参数→方法 折叠目录) / 详情(四大板块) / 后台(记录·字段·导入·备份)。 */
 (function () {
   const $app = document.getElementById('app');
@@ -41,6 +41,36 @@
     return (n / 1024 / 1024).toFixed(2) + ' MB';
   }
 
+  /* ---------- 标准库分类 ---------- */
+  // 首次启动写入的默认分类；之后用户可自行增、改名、删除
+  const DEFAULT_CATEGORIES = ['基础规范', '水和废水', '土壤', '空气', '固体废物'];
+  const UNCAT = '__uncat__'; // 未归类（老数据）的虚拟分组
+
+  async function ensureDefaultCategories() {
+    const seeded = await DB.getMeta('categoriesSeeded');
+    const list = await DB.listCategories();
+    if (seeded || list.length) return;
+    let sort = 0;
+    for (const name of DEFAULT_CATEGORIES) {
+      await DB.putCategory({ id: 'cat_' + sort + '_' + Date.now().toString(36), name, sort: sort++ });
+    }
+    await DB.setMeta('categoriesSeeded', 1);
+  }
+
+  // 把 PDF 按分类分组，返回 [{id, name, docs}]，未归类的放最后
+  async function groupPdfsByCategory() {
+    const [docs, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    const map = new Map(cats.map((c) => [c.id, { id: c.id, name: c.name, docs: [] }]));
+    const rest = [];
+    for (const d of docs) {
+      const bucket = d.category && map.has(d.category) ? map.get(d.category) : null;
+      if (bucket) bucket.docs.push(d); else rest.push(d);
+    }
+    const out = cats.map((c) => map.get(c.id)).filter(Boolean);
+    if (rest.length) out.push({ id: UNCAT, name: '未分类', docs: rest });
+    return { groups: out, cats, total: docs.length };
+  }
+
   /* ---------- 路由 ---------- */
   function route() {
     const h = location.hash.slice(1) || '/';
@@ -60,6 +90,7 @@
       if (path === '/field/new') return await fieldEdit();
       if (path === '/import') return await importPage();
       if (path === '/backup') return await backupPage();
+      if (path === '/library') return await library();
     } catch (e) {
       console.error(e);
       $app.innerHTML = `<div class="boot">出错了：${esc(e.message || e)}</div>`;
@@ -90,7 +121,9 @@
 
   /* ---------- 主页面：参数→方法 两级折叠目录 ---------- */
   async function home() {
-    const [fields, records] = await Promise.all([DB.getAllFields(), DB.getAllRecords()]);
+    const [fields, records, lib] = await Promise.all([
+      DB.getAllFields(), DB.getAllRecords(), groupPdfsByCategory()
+    ]);
     const paramKey = (fields.find((f) => f.name === '参数') || {}).key || 'param_name';
     const methodKey = (fields.find((f) => f.name === '方法(标准号)') || {}).key || 'method';
 
@@ -103,10 +136,18 @@
     const paramNames = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'zh'));
 
     $app.innerHTML = `
-      ${appbar('检测参数质控助手')}
+      ${appbar('我的检测参数')}
       <div class="searchwrap">
         <input id="q" class="search" type="search" placeholder="搜参数名 / 方法名 / 任意内容" />
       </div>
+      <button class="entry-card" data-act="library">
+        <span class="entry-icon">📚</span>
+        <span class="entry-main">
+          <span class="entry-title">标准库</span>
+          <span class="entry-sub">共 ${lib.total} 份标准 · ${lib.groups.length} 个分类</span>
+        </span>
+        <span class="entry-arrow">›</span>
+      </button>
       <div id="tree" class="tree"></div>
       <button class="fab" data-act="manage" aria-label="管理">⚙</button>
     `;
@@ -125,9 +166,9 @@
         });
         if (!items.length) continue;
         const open = expanded[p] === true;
-        html += `<div class="tree-group">
+        html += `<div class="tree-group${open ? ' open' : ''}">
           <div class="tree-parent" data-param="${esc(p)}">
-            <span class="chevron">${open ? '▾' : '▸'}</span>
+            <span class="chevron">▸</span>
             <span class="tree-parent-name">${esc(p)}</span>
             <span class="count">${items.length}</span>
           </div>
@@ -145,7 +186,154 @@
     }
     $app.querySelector('#q').addEventListener('input', renderTree);
     $app.querySelector('[data-act="manage"]').addEventListener('click', () => go('/manage'));
+    $app.querySelector('[data-act="library"]').addEventListener('click', () => go('/library'));
     renderTree();
+  }
+
+  /* ---------- 标准库：按分类查看已上传的标准 PDF ---------- */
+  async function library() {
+    let { groups, cats, total } = await groupPdfsByCategory();
+    const expanded = {}; // 分类 id -> 是否展开（默认全部折叠）
+
+    $app.innerHTML = `
+      ${appbar('标准库', true)}
+      <div class="searchwrap">
+        <input id="lq" class="search" type="search" placeholder="搜标准名称" />
+      </div>
+      <div class="lib-actions">
+        <button class="btn btn-primary" data-act="upload">＋ 上传标准</button>
+        <button class="btn" data-act="catman">管理分类</button>
+      </div>
+      <div id="uploader" class="uploader" hidden>
+        <div class="uploader-inner">
+          <label class="label">选择分类</label>
+          <select id="upCat" class="input">${cats.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+          <label class="label">选择 PDF 文件（可多选）</label>
+          <input id="upFile" class="input" type="file" accept="application/pdf,.pdf" multiple />
+          <div class="uploader-btns">
+            <button class="btn btn-primary" data-act="doUp" disabled>上传到该分类</button>
+            <button class="btn" data-act="cancelUp">取消</button>
+          </div>
+        </div>
+      </div>
+      <div id="catman" class="catman" hidden>
+        <div class="catman-inner">
+          ${cats.map((c) => `<div class="cat-row" data-id="${esc(c.id)}">
+            <span class="cat-name">${esc(c.name)}</span>
+            <button class="linkbtn" data-rename="${esc(c.id)}">改名</button>
+            <button class="linkbtn danger" data-catdel="${esc(c.id)}">删除</button>
+          </div>`).join('') || '<div class="empty">还没有分类</div>'}
+          <button class="btn btn-primary block" data-act="addcat">＋ 新增分类</button>
+          <p class="hint">删除分类不会删除里面的 PDF，它们会移到「未分类」；改名后已归入的文件自动跟随。</p>
+        </div>
+      </div>
+      <div id="libtree" class="tree libtree"></div>
+    `;
+    $app.querySelector('[data-act="back"]').addEventListener('click', () => go('/'));
+
+    const treeEl = $app.querySelector('#libtree');
+
+    function renderLib() {
+      const q = ($app.querySelector('#lq').value || '').trim().toLowerCase();
+      let html = '';
+      for (const g of groups) {
+        const docs = g.docs.filter((d) => !q || (d.name || '').toLowerCase().includes(q));
+        if (!docs.length) continue;
+        const open = expanded[g.id] === true;
+        html += `<div class="tree-group${open ? ' open' : ''}">
+          <div class="tree-parent" data-cat="${esc(g.id)}">
+            <span class="chevron">▸</span>
+            <span class="tree-parent-name">${esc(g.name)}</span>
+            <span class="count">${docs.length}</span>
+          </div>
+          ${open ? `<div class="tree-children">${docs.map((d) => `
+            <div class="tree-child" data-pdf="${esc(d.id)}">
+              <span class="dot">📄</span><span class="tree-child-name">${esc(d.name)}</span>
+              <span class="tree-child-sub">${fmtSize(d.size)}</span>
+              <select class="cat-move" data-movefrom="${esc(d.id)}" aria-label="移动到分类">
+                <option value="">未分类</option>
+                ${cats.map((c) => `<option value="${esc(c.id)}"${d.category === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+              </select>
+            </div>`).join('')}</div>` : ''}
+        </div>`;
+      }
+      treeEl.innerHTML = html || `<div class="empty">${total ? '没有匹配的标准' : '还没有上传标准，点上方「＋ 上传标准」'}</div>`;
+      treeEl.querySelectorAll('.tree-parent').forEach((el) =>
+        el.addEventListener('click', () => { expanded[el.dataset.cat] = expanded[el.dataset.cat] !== true; renderLib(); }));
+      treeEl.querySelectorAll('.tree-child').forEach((el) =>
+        el.addEventListener('click', async (e) => {
+          if (e.target.closest('.cat-move')) return; // 点移动分类下拉时不打开文件
+          const doc = await DB.getPdf(el.dataset.pdf);
+          if (!doc) { toast('文件已不存在'); return; }
+          openPdfViewer(doc, doc.name);
+        }));
+      // 直接把文件移到别的分类
+      treeEl.querySelectorAll('.cat-move').forEach((sel) =>
+        sel.addEventListener('change', async (e) => {
+          e.stopPropagation();
+          const doc = await DB.getPdf(sel.dataset.movefrom);
+          if (!doc) return;
+          await DB.putPdf(Object.assign({}, doc, { category: sel.value || null }));
+          toast('已移动到：' + (sel.options[sel.selectedIndex].text || '未分类'));
+          const keep = expanded; // 保持展开状态
+          const fresh = await groupPdfsByCategory();
+          groups = fresh.groups; cats = fresh.cats; total = fresh.total;
+          Object.keys(keep).forEach((k) => { expanded[k] = keep[k]; });
+          renderLib();
+        }));
+    }
+
+    // 上传区
+    const upBox = $app.querySelector('#uploader');
+    const upFile = $app.querySelector('#upFile');
+    const doUp = $app.querySelector('[data-act="doUp"]');
+    $app.querySelector('[data-act="upload"]').addEventListener('click', () => {
+      upBox.hidden = !upBox.hidden;
+      if (!upBox.hidden) upBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+    $app.querySelector('[data-act="cancelUp"]').addEventListener('click', () => { upBox.hidden = true; upFile.value = ''; doUp.disabled = true; });
+    upFile.addEventListener('change', () => { doUp.disabled = !upFile.files.length; });
+    doUp.addEventListener('click', async () => {
+      const files = Array.from(upFile.files || []);
+      if (!files.length) return;
+      const catId = $app.querySelector('#upCat').value;
+      doUp.disabled = true;
+      for (const f of files) {
+        const id = 'pdf_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
+        await DB.putPdf({ id, name: f.name, size: f.size, blob: f, category: catId });
+      }
+      toast('已上传 ' + files.length + ' 份标准');
+      library(); // 重新渲染
+    });
+
+    // 分类管理
+    const catBox = $app.querySelector('#catman');
+    $app.querySelector('[data-act="catman"]').addEventListener('click', () => { catBox.hidden = !catBox.hidden; });
+    $app.querySelector('[data-act="addcat"]').addEventListener('click', async () => {
+      const name = (prompt('新分类名称：') || '').trim();
+      if (!name) return;
+      const maxSort = cats.reduce((m, c) => Math.max(m, c.sort || 0), 0);
+      await DB.putCategory({ id: 'cat_' + Date.now().toString(36), name, sort: maxSort + 1 });
+      toast('已新增分类：' + name);
+      library();
+    });
+    catBox.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', async () => {
+      const cur = cats.find((c) => c.id === b.dataset.rename);
+      const name = (prompt('修改为：', cur ? cur.name : '') || '').trim();
+      if (!name || !cur) return;
+      await DB.putCategory(Object.assign({}, cur, { name }));
+      toast('已改名'); library();
+    }));
+    catBox.querySelectorAll('[data-catdel]').forEach((b) => b.addEventListener('click', async () => {
+      const cur = cats.find((c) => c.id === b.dataset.catdel);
+      if (!cur) return;
+      if (!confirm('删除分类「' + cur.name + '」？其中文件会移到「未分类」，不会被删除。')) return;
+      await DB.deleteCategory(cur.id);
+      toast('已删除分类'); library();
+    }));
+
+    $app.querySelector('#lq').addEventListener('input', renderLib);
+    renderLib();
   }
 
   /* ---------- 详情页：四大板块 ---------- */
@@ -421,19 +609,24 @@
         <button class="btn btn-primary block" data-act="go">开始导入</button></div>`;
       body.querySelector('[data-act="go"]').addEventListener('click', () => go('/import'));
     } else if (tab === 'pdfs') {
-      const [list, defId] = await Promise.all([DB.listPdfs(), DB.getMeta('defaultPdfId')]);
+      const [list, defId, cats] = await Promise.all([DB.listPdfs(), DB.getMeta('defaultPdfId'), DB.listCategories()]);
+      const catName = (id) => (cats.find((c) => c.id === id) || {}).name || '未分类';
       body.innerHTML = `
         <div class="group"><div class="group-title">上传标准原文 PDF</div>
           <p class="hint">上传的 PDF 只保存在这台设备的本地数据库中，不会联网上传。上传后自动设为默认；
-             详情页点「查看」即打开<strong>默认</strong>的那份（当前所有方法共用同一份）。</p>
-          <input id="pdf" class="input" type="file" accept="application/pdf,.pdf" />
+             详情页点「查看」即打开<strong>默认</strong>的那份（供未单独绑定标准的方法使用）。
+             也可到首页「标准库」按分类上传与浏览。</p>
+          <div class="form-row"><label class="label">归入分类</label>
+            <select id="pdfCat" class="input">${cats.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+          </div>
+          <input id="pdf" class="input" type="file" accept="application/pdf,.pdf" multiple />
           <button class="btn btn-primary block" data-act="up" disabled id="doUp">上传并设为默认</button>
         </div>
         <div class="group"><div class="group-title">已保存（${list.length}）</div>
           ${list.map((d) => `<div class="row">
             <div class="row-main">
               <div class="row-title">${esc(d.name)}</div>
-              <div class="row-sub">${fmtSize(d.size)}${d.id === defId ? ' · 默认' : ''}${d.builtin ? ' · 内置' : ''}</div>
+              <div class="row-sub">${esc(catName(d.category))} · ${fmtSize(d.size)}${d.id === defId ? ' · 默认' : ''}${d.builtin ? ' · 内置' : ''}</div>
             </div>
             ${d.id === defId ? '' : `<button class="linkbtn" data-def="${esc(d.id)}">设为默认</button>`}
             <button class="row-del" data-del="${esc(d.id)}" aria-label="删除">🗑</button>
@@ -444,12 +637,17 @@
       const doUp = body.querySelector('#doUp');
       pdfInput.addEventListener('change', () => { doUp.disabled = !pdfInput.files[0]; });
       doUp.addEventListener('click', async () => {
-        const f = pdfInput.files[0]; if (!f) return;
+        const files = Array.from(pdfInput.files || []);
+        if (!files.length) return;
+        const catId = body.querySelector('#pdfCat').value;
         doUp.disabled = true;
-        const id = 'pdf_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
-        await DB.putPdf({ id, name: f.name, size: f.size, blob: f });
-        await DB.setMeta('defaultPdfId', id);
-        toast('已上传并设为默认：' + f.name);
+        let lastId = null;
+        for (const f of files) {
+          lastId = 'pdf_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
+          await DB.putPdf({ id: lastId, name: f.name, size: f.size, blob: f, category: catId });
+        }
+        await DB.setMeta('defaultPdfId', lastId);
+        toast('已上传 ' + files.length + ' 份并设为默认');
         manage('pdfs');
       });
       body.querySelectorAll('[data-def]').forEach((b) => b.addEventListener('click', async () => {
@@ -861,7 +1059,7 @@
       const a = document.createElement('a');
       const stamp = new Date().toISOString().slice(0, 10);
       a.href = URL.createObjectURL(blob);
-      a.download = `参数质控备份_${stamp}.json`;
+      a.download = `我的检测参数_备份_${stamp}.json`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       toast('已导出备份文件');
@@ -984,13 +1182,14 @@
   const BUILTIN_PDF_NAME = 'GB 7475-87 水质 铜、锌、铅、镉的测定 原子吸收分光光度法.pdf';
   async function ensureDefaultPdf() {
     const list = await DB.listPdfs();
-    if (list.length) return; // 已存在标准原文就不覆盖
+    if (list.length) return; // 已存在标准原文就不覆盖（老数据留在「未分类」，可在标准库里自行移动）
     try {
       const res = await fetch(BUILTIN_PDF_ASSET);
       if (!res.ok) return;
       const blob = await res.blob();
       const id = 'builtin_gb7475_87';
-      await DB.putPdf({ id, name: BUILTIN_PDF_NAME, size: blob.size, blob, builtin: true });
+      const cat = (await DB.listCategories()).find((c) => c.name === '水和废水');
+      await DB.putPdf({ id, name: BUILTIN_PDF_NAME, size: blob.size, blob, builtin: true, category: cat ? cat.id : null });
       const defId = await DB.getMeta('defaultPdfId');
       if (!defId) await DB.setMeta('defaultPdfId', id);
     } catch (e) { console.warn('内置标准原文未载入', e); }
@@ -1002,6 +1201,7 @@
     try { await seedIfNeeded(); } catch (e) { console.error('seed error', e); }
     try { await ensureFieldsFromSeed(); } catch (e) { console.error('ensure error', e); }
     try { const n = await migrateRecordData(); if (n) console.log('已迁移记录', n, '条'); } catch (e) { console.error('migrate error', e); }
+    try { await ensureDefaultCategories(); } catch (e) { console.error('category seed error', e); }
     try { await ensureDefaultPdf(); } catch (e) { console.error('pdf seed error', e); }
     if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
       navigator.serviceWorker.register('sw.js').then((reg) => {

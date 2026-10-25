@@ -1,13 +1,13 @@
 {
-  "name": "检测参数质控助手",
-  "short_name": "参数质控",
-  "description": "个人离线检测参数与质控措施查询管理工具",
+  "name": "我的检测参数",
+  "short_name": "检测参数",
+  "description": "个人离线检测参数查询与质控措施管理工具",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f5f7fa",
-  "theme_color": "#1565c0",
+  "background_color": "#f4f6fa",
+  "theme_color": "#2563eb",
   "icons": [
     {
       "src": "icon-180.png",
