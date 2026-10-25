@@ -57,9 +57,117 @@
     await DB.setMeta('categoriesSeeded', 1);
   }
 
-  // 把 PDF 按分类分组，返回 [{id, name, docs}]，未归类的放最后
+  /* ---------- 标准原文的删除：同时清掉方法记录里的绑定，避免留下打不开的死链 ---------- */
+  async function countPdfUsage(pdfId) {
+    const recs = await DB.getAllRecords();
+    return (recs || []).filter((r) => r && r.data && String(r.data.std_pdf_id || '') === pdfId).length;
+  }
+  async function deletePdfSafely(pdfId) {
+    const recs = await DB.getAllRecords();
+    for (const r of recs || []) {
+      if (r && r.data && String(r.data.std_pdf_id || '') === pdfId) {
+        const d = Object.assign({}, r.data);
+        delete d.std_pdf_id; // 解绑后该记录详情页自动回退到「默认标准」
+        await DB.putRecord({ id: r.id, data: d });
+      }
+    }
+    await DB.deletePdf(pdfId);
+    const defId = await DB.getMeta('defaultPdfId');
+    if (defId === pdfId) { // 删掉的正好是默认标准，就把默认让给剩下的第一份
+      const rest = await DB.listPdfs();
+      await DB.setMeta('defaultPdfId', rest.length ? rest[0].id : '');
+    }
+  }
+
+  /* ---------- 左滑条目：露出「重命名 / 删除」 ---------- */
+  const SWIPE_W = 148; // 右侧操作区宽度，和 CSS 里 .lib-actions 保持一致
+  function setSwipeX(item, x, animate) {
+    const inner = item.querySelector('.lib-item-inner');
+    if (!inner) return;
+    inner.style.transition = animate ? 'transform .2s ease' : 'none';
+    inner.style.transform = 'translateX(' + x + 'px)';
+  }
+  function closeAllSwipe(scope) {
+    (scope || document).querySelectorAll('.lib-item.swiped').forEach((it) => {
+      it.classList.remove('swiped');
+      setSwipeX(it, 0, true);
+    });
+  }
+  // 用指针事件统一处理手指与鼠标拖动；纵向滚动交给 CSS 的 touch-action: pan-y
+  function bindSwipeItem(item) {
+    const inner = item.querySelector('.lib-item-inner');
+    if (!inner || item.dataset.swipeBound === '1') return;
+    item.dataset.swipeBound = '1';
+    let startX = 0, startY = 0, base = 0, cur = 0, active = false, axis = null, moved = false;
+
+    function onStart(p) {
+      active = true; axis = null; moved = false;
+      startX = p.clientX; startY = p.clientY;
+      base = item.classList.contains('swiped') ? -SWIPE_W : 0;
+      cur = base;
+    }
+    function onMove(p) {
+      if (!active) return;
+      const dx = p.clientX - startX, dy = p.clientY - startY;
+      if (!axis) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        if (axis === 'x') closeAllSwipe(item.parentElement); // 同一时间只滑开一个
+      }
+      if (axis !== 'x') { active = false; return; }
+      moved = true;
+      let x = base + dx;
+      if (x > 0) x = 0;
+      if (x < -SWIPE_W - 20) x = -SWIPE_W - 20; // 允许轻微超拉，松手回弹
+      cur = x;
+      setSwipeX(item, x, false);
+    }
+    function onEnd() {
+      if (!active) return;
+      active = false;
+      if (axis !== 'x') return;
+      const open = item.classList.contains('swiped');
+      if (open) {
+        if (cur > -SWIPE_W + 40) { item.classList.remove('swiped'); setSwipeX(item, 0, true); }
+        else setSwipeX(item, -SWIPE_W, true);
+      } else if (cur < -40) { item.classList.add('swiped'); setSwipeX(item, -SWIPE_W, true); }
+      else setSwipeX(item, 0, true);
+      if (moved) { // 标记一下，避免滑动结束时被当成点击而误打开文件
+        item.dataset.moved = '1';
+        setTimeout(() => { item.dataset.moved = '0'; }, 80);
+      }
+    }
+
+    if (window.PointerEvent) {
+      item.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('.cat-move') || e.target.closest('.lib-actions')) return; // 下拉框/按钮不触发滑动
+        onStart(e);
+        try { item.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      });
+      item.addEventListener('pointermove', (e) => { if (active) onMove(e); });
+      item.addEventListener('pointerup', onEnd);
+      item.addEventListener('pointercancel', onEnd);
+    } else { // 老浏览器兜底：触摸事件
+      item.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1 || e.target.closest('.cat-move') || e.target.closest('.lib-actions')) return;
+        onStart(e.touches[0]);
+      }, { passive: true });
+      item.addEventListener('touchmove', (e) => { if (e.touches.length === 1) onMove(e.touches[0]); }, { passive: true });
+      item.addEventListener('touchend', onEnd);
+      item.addEventListener('touchcancel', onEnd);
+    }
+  }
+
+  // 按名称排序：中文按拼音、编号里的数字按数值大小（GB 7475 排在 GB 11893 前）
+  function sortByName(list) {
+    return (list || []).slice().sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }));
+  }
+
+  // 把 PDF 按分类分组，返回 [{id, name, docs}]，未归类的放最后；组内按名称排序
   async function groupPdfsByCategory() {
-    const [docs, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    const [raw, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    const docs = sortByName(raw);
     const map = new Map(cats.map((c) => [c.id, { id: c.id, name: c.name, docs: [] }]));
     const rest = [];
     for (const d of docs) {
@@ -227,6 +335,7 @@
           <p class="hint">删除分类不会删除里面的 PDF，它们会移到「未分类」；改名后已归入的文件自动跟随。</p>
         </div>
       </div>
+      <p class="hint libhint">点击打开标准全文，<strong>向左滑动条目</strong>可重命名或删除。</p>
       <div id="libtree" class="tree libtree"></div>
     `;
     $app.querySelector('[data-act="back"]').addEventListener('click', () => go('/'));
@@ -247,26 +356,66 @@
             <span class="count">${docs.length}</span>
           </div>
           ${open ? `<div class="tree-children">${docs.map((d) => `
-            <div class="tree-child" data-pdf="${esc(d.id)}">
-              <span class="dot">📄</span><span class="tree-child-name">${esc(d.name)}</span>
-              <span class="tree-child-sub">${fmtSize(d.size)}</span>
-              <select class="cat-move" data-movefrom="${esc(d.id)}" aria-label="移动到分类">
-                <option value="">未分类</option>
-                ${cats.map((c) => `<option value="${esc(c.id)}"${d.category === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
-              </select>
+            <div class="lib-item" data-pdf="${esc(d.id)}">
+              <div class="lib-item-inner">
+                <span class="dot">📄</span><span class="tree-child-name">${esc(d.name)}</span>
+                <span class="tree-child-sub">${fmtSize(d.size)}</span>
+                <select class="cat-move" data-movefrom="${esc(d.id)}" aria-label="移动到分类">
+                  <option value="">未分类</option>
+                  ${cats.map((c) => `<option value="${esc(c.id)}"${d.category === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="lib-actions">
+                <button class="sw-act sw-rename" data-pdfrename="${esc(d.id)}">重命名</button>
+                <button class="sw-act sw-del" data-pdfdel="${esc(d.id)}">删除</button>
+              </div>
             </div>`).join('')}</div>` : ''}
         </div>`;
       }
       treeEl.innerHTML = html || `<div class="empty">${total ? '没有匹配的标准' : '还没有上传标准，点上方「＋ 上传标准」'}</div>`;
       treeEl.querySelectorAll('.tree-parent').forEach((el) =>
         el.addEventListener('click', () => { expanded[el.dataset.cat] = expanded[el.dataset.cat] !== true; renderLib(); }));
-      treeEl.querySelectorAll('.tree-child').forEach((el) =>
+      // 左滑条目：露出「重命名 / 删除」
+      treeEl.querySelectorAll('.lib-item').forEach(bindSwipeItem);
+      treeEl.querySelectorAll('.lib-item-inner').forEach((el) =>
         el.addEventListener('click', async (e) => {
           if (e.target.closest('.cat-move')) return; // 点移动分类下拉时不打开文件
-          const doc = await DB.getPdf(el.dataset.pdf);
+          const item = el.closest('.lib-item');
+          const opened = treeEl.querySelector('.lib-item.swiped');
+          if (opened) { closeAllSwipe(treeEl); if (opened !== item) return; } // 有滑开的条目：先收起，本轮不打开文件
+          if (item.classList.contains('swiped')) return;
+          if (item.dataset.moved === '1') return; // 刚滑动过，不算点击
+          const doc = await DB.getPdf(item.dataset.pdf);
           if (!doc) { toast('文件已不存在'); return; }
           openPdfViewer(doc, doc.name);
         }));
+      // 重命名标准（只改显示名，文件本身不动）
+      treeEl.querySelectorAll('[data-pdfrename]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = b.dataset.pdfrename;
+        const doc = await DB.getPdf(id);
+        if (!doc) { toast('文件已不存在'); return; }
+        const name = (prompt('重命名为：', doc.name) || '').trim();
+        if (!name || name === doc.name) { closeAllSwipe(treeEl); return; }
+        await DB.putPdf(Object.assign({}, doc, { name }));
+        toast('已重命名');
+        await refreshLib();
+      }));
+      // 删除标准：会同时解绑引用它的方法记录
+      treeEl.querySelectorAll('[data-pdfdel]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = b.dataset.pdfdel;
+        const doc = await DB.getPdf(id);
+        if (!doc) { toast('文件已不存在'); return; }
+        const used = await countPdfUsage(id);
+        const msg = used
+          ? '删除标准「' + doc.name + '」？\n有 ' + used + ' 条方法记录正在引用它，删除后这些记录会回退到默认标准。'
+          : '删除标准「' + doc.name + '」？此操作不可恢复。';
+        if (!confirm(msg)) { closeAllSwipe(treeEl); return; }
+        await deletePdfSafely(id);
+        toast('已删除');
+        await refreshLib();
+      }));
       // 直接把文件移到别的分类
       treeEl.querySelectorAll('.cat-move').forEach((sel) =>
         sel.addEventListener('change', async (e) => {
@@ -275,12 +424,17 @@
           if (!doc) return;
           await DB.putPdf(Object.assign({}, doc, { category: sel.value || null }));
           toast('已移动到：' + (sel.options[sel.selectedIndex].text || '未分类'));
-          const keep = expanded; // 保持展开状态
-          const fresh = await groupPdfsByCategory();
-          groups = fresh.groups; cats = fresh.cats; total = fresh.total;
-          Object.keys(keep).forEach((k) => { expanded[k] = keep[k]; });
-          renderLib();
+          await refreshLib();
         }));
+    }
+
+    // 重新取数据后重绘，保持各分类展开状态
+    async function refreshLib() {
+      const keep = Object.assign({}, expanded);
+      const fresh = await groupPdfsByCategory();
+      groups = fresh.groups; cats = fresh.cats; total = fresh.total;
+      Object.keys(keep).forEach((k) => { expanded[k] = keep[k]; });
+      renderLib();
     }
 
     // 上传区
@@ -650,10 +804,14 @@
         await DB.setMeta('defaultPdfId', b.dataset.def); toast('已设为默认'); manage('pdfs');
       }));
       body.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
-        if (!confirm('删除这份标准原文？')) return;
-        await DB.deletePdf(b.dataset.del);
-        const rest = await DB.listPdfs();
-        await DB.setMeta('defaultPdfId', rest.length ? rest[0].id : '');
+        const doc = await DB.getPdf(b.dataset.del);
+        const used = await countPdfUsage(b.dataset.del);
+        const nm = doc ? doc.name : '这份标准';
+        const msg = used
+          ? '删除标准「' + nm + '」？\n有 ' + used + ' 条方法记录正在引用它，删除后这些记录会回退到默认标准。'
+          : '删除标准「' + nm + '」？';
+        if (!confirm(msg)) return;
+        await deletePdfSafely(b.dataset.del);
         toast('已删除'); manage('pdfs');
       }));
     } else if (tab === 'backup') {
@@ -667,7 +825,8 @@
   /* ---------- 从「标准库」挑选已上传的标准原文 ----------
      编辑记录时优先从标准库里选，避免同一种标准反复上传占空间。 */
   async function openLibPicker(onPick) {
-    const [docs, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    const [rawDocs, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    const docs = sortByName(rawDocs);
     let modal = document.getElementById('libPickModal');
     if (!modal) {
       modal = document.createElement('div');
