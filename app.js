@@ -420,8 +420,8 @@
       </div>
       <div class="actions">
         <button class="btn btn-primary" data-act="edit">编辑</button>
-        <button class="btn btn-danger" data-act="del">删除</button>
       </div>
+      <p class="del-hint">需要删除这条记录？请到右下角 ⚙「后台管理 → 记录管理」中删除，避免误触。</p>
     `;
     $app.querySelector('[data-act="back"]').addEventListener('click', () => go('/'));
     const viewBtn = $app.querySelector('[data-act="viewstd"]');
@@ -445,10 +445,6 @@
       first.appendChild(row);
     })();
     $app.querySelector('[data-act="edit"]').addEventListener('click', () => go('/record/edit?id=' + id));
-    $app.querySelector('[data-act="del"]').addEventListener('click', async () => {
-      if (!confirm('确定删除这条记录吗？此操作不可撤销。')) return;
-      await DB.deleteRecord(id); toast('已删除'); go('/');
-    });
   }
 
   /* ---------- 标准原文（PDF）：本地查看 ----------
@@ -668,6 +664,49 @@
   }
 
   /* ---------- 记录编辑（新增/修改） ---------- */
+  /* ---------- 从「标准库」挑选已上传的标准原文 ----------
+     编辑记录时优先从标准库里选，避免同一种标准反复上传占空间。 */
+  async function openLibPicker(onPick) {
+    const [docs, cats] = await Promise.all([DB.listPdfs(), DB.listCategories()]);
+    let modal = document.getElementById('libPickModal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'libPickModal';
+      modal.className = 'pdf-modal'; // 复用 PDF 浮层的外观与显示逻辑
+      document.body.appendChild(modal);
+    }
+    const byCat = {};
+    for (const d of docs) { const k = d.category || UNCAT; (byCat[k] = byCat[k] || []).push(d); }
+    const groups = cats.map((c) => ({ id: c.id, name: c.name, docs: byCat[c.id] || [] }));
+    if (byCat[UNCAT] && byCat[UNCAT].length) groups.push({ id: UNCAT, name: '未分类', docs: byCat[UNCAT] });
+
+    modal.innerHTML = `
+      <div class="pdf-bar">
+        <button class="pdf-close" data-act="pickclose" aria-label="关闭">×</button>
+        <div class="pdf-title">从标准库选择</div>
+        <span class="pick-count">共 ${docs.length} 份</span>
+      </div>
+      <div class="pick-body">
+        ${docs.length ? groups.filter((g) => g.docs.length).map((g) => `
+          <div class="pick-group">
+            <div class="pick-group-title">${esc(g.name)}<span class="pick-n">${g.docs.length}</span></div>
+            ${g.docs.map((d) => `<div class="pick-item${d.id === curPickId() ? ' on' : ''}" data-id="${esc(d.id)}">
+              <span class="dot">📄</span>
+              <span class="pick-item-name">${esc(d.name)}</span>
+              <span class="pick-item-sub">${fmtSize(d.size)}</span>
+            </div>`).join('')}
+          </div>`).join('') : '<div class="empty">标准库里还没有文件，请点「从手机上传」</div>'}
+      </div>`;
+    modal.classList.add('show');
+    modal.querySelector('[data-act="pickclose"]').addEventListener('click', () => modal.classList.remove('show'));
+    modal.querySelectorAll('.pick-item').forEach((el) => el.addEventListener('click', () => {
+      modal.classList.remove('show');
+      onPick(el.dataset.id);
+    }));
+  }
+  let _curPickId = '';
+  const curPickId = () => _curPickId;
+
   async function recordEdit(id) {
     const fields = await DB.getAllFields();
     const rec = id ? await DB.getRecord(id) : null;
@@ -741,9 +780,11 @@
             <div class="pdf-up">
               <div class="pdf-up-name" data-role="pdfname">未上传</div>
               <div class="pdf-up-btns">
-                <button type="button" class="btn btn-mini" data-act="pickpdf">上传标准原文</button>
+                <button type="button" class="btn btn-mini btn-mini-primary" data-act="picklib">从标准库选择</button>
+                <button type="button" class="btn btn-mini" data-act="pickpdf">从手机上传</button>
                 <button type="button" class="btn btn-mini btn-mini-danger" data-act="clearpdf" hidden>移除</button>
               </div>
+              <div class="pdf-up-tip">优先从标准库选择；库里没有再「从手机上传」，上传后会自动加入标准库（未分类）。</div>
             </div>
             <input type="file" id="pdfInput" accept="application/pdf,.pdf" hidden />
           </div>` : ''}
@@ -785,7 +826,8 @@
     const pdfInput = form.querySelector('#pdfInput');
     const pdfNameEl = form.querySelector('[data-role="pdfname"]');
     const clearBtn = form.querySelector('[data-act="clearpdf"]');
-    function paintPdf(name) {
+    function paintPdf(name, pid) {
+      _curPickId = pid || '';
       if (!pdfNameEl) return;
       pdfNameEl.textContent = name || '未上传';
       pdfNameEl.classList.toggle('on', !!name);
@@ -794,13 +836,26 @@
     (async () => {
       if (!pdfNameEl || !stdPdfId) return;
       const doc = await DB.getPdf(stdPdfId);
-      if (doc) paintPdf(doc.name); else { stdPdfId = ''; paintPdf(''); }
+      if (doc) paintPdf(doc.name, doc.id); else { stdPdfId = ''; paintPdf('', ''); }
     })();
     form.addEventListener('click', (e) => {
+      if (e.target.closest('[data-act="picklib"]')) {
+        DB.listPdfs().then(async (docs) => {
+          if (!docs.length) { toast('标准库里还没有文件，请点「从手机上传」'); return; }
+          await openLibPicker(async (pid) => {
+            const doc = await DB.getPdf(pid);
+            if (!doc) { toast('文件已不存在'); return; }
+            stdPdfId = pid;
+            paintPdf(doc.name, pid);
+            toast('已绑定：' + doc.name);
+          });
+        });
+        return;
+      }
       if (e.target.closest('[data-act="pickpdf"]')) { pdfInput && pdfInput.click(); return; }
       if (e.target.closest('[data-act="clearpdf"]')) {
         stdPdfId = '';
-        paintPdf('');
+        paintPdf('', '');
         toast('已解除绑定（文件仍留在标准原文库，可在后台删除）');
       }
     });
@@ -810,10 +865,11 @@
       const isPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
       if (!isPdf) { toast('请选择 PDF 文件'); pdfInput.value = ''; return; }
       const pid = 'pdf_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
+      // 上传的文件同时进入「标准库」（未分类），之后可在标准库里移到对应分类
       await DB.putPdf({ id: pid, name: file.name, size: file.size, blob: file, uploadedAt: Date.now() });
       stdPdfId = pid;
-      paintPdf(file.name);
-      toast('已上传：' + file.name);
+      paintPdf(file.name, pid);
+      toast('已上传并加入标准库：' + file.name);
       pdfInput.value = '';
     });
 

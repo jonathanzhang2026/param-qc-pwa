@@ -121,7 +121,7 @@ body {
 .field-row { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px dashed var(--line-soft); }
 .field-row:last-child { border-bottom: none; }
 /* 字段名 15% / 内容 85%（用户指定比例）：字段名过窄，允许折行并收紧字距 */
-.field-label { flex: 0 0 15%; max-width: 15%; color: var(--faint); font-size: 13px; line-height: 1.35; word-break: break-word; letter-spacing: -0.2px; }
+.field-label { flex: 0 0 20%; max-width: 20%; color: var(--faint); font-size: 13px; line-height: 1.35; word-break: break-word; letter-spacing: -0.2px; }
 .field-value { flex: 1 1 auto; min-width: 0; color: var(--text); font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap; }
 
 /* ============ 按钮 ============ */
@@ -257,6 +257,12 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; min-height:
 }
 .btn-mini:active { background: var(--primary-soft); }
 .btn-mini-danger { border-color: #f0c4c6; color: #c62828; }
+/* 主按钮样式：用于「从标准库选择」这类首选操作 */
+.btn-mini-primary { border-style: solid; border-color: var(--primary); background: var(--primary); color: #fff; font-weight: 600; }
+.btn-mini-primary:active { background: var(--primary-dark, #1d4ed8); }
+.pdf-up-tip { font-size: 12px; color: var(--faint); line-height: 1.5; margin-top: 2px; }
+/* 详情页：删除入口已移除，给一句引导文案 */
+.del-hint { margin: 10px 16px 4px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); font-size: 12px; color: var(--faint); text-align: center; line-height: 1.5; }
 
 /* ============ 编辑页：本条记录的标准原文上传 ============ */
 .pdf-up { display: flex; flex-direction: column; gap: 8px; }
@@ -303,6 +309,30 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; min-height:
   text-align: center; background: #fafbfc; border-top: 1px solid var(--line);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ============ 从标准库选择（编辑页弹层） ============ */
+.pick-count { flex: 0 0 auto; font-size: 12px; color: #fff; opacity: .9; padding-right: 4px; }
+.pick-body { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 12px 14px calc(16px + var(--safe-b)); }
+.pick-group { margin-bottom: 14px; }
+.pick-group-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 700; color: var(--primary); padding: 2px 0 6px;
+}
+.pick-group-title .pick-n {
+  font-size: 11px; font-weight: 600; color: var(--primary);
+  background: var(--primary-soft); border-radius: 9px; padding: 1px 7px;
+}
+.pick-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 12px; margin-bottom: 6px;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow, 0 1px 3px rgba(16, 24, 40, .06)); cursor: pointer;
+}
+.pick-item:active { background: var(--primary-soft); }
+.pick-item.on { border-color: var(--primary); background: var(--chip); }
+.pick-item .dot { flex: 0 0 auto; font-size: 15px; }
+.pick-item-name { flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 500; color: var(--text); word-break: break-all; line-height: 1.4; }
+.pick-item-sub { flex: 0 0 auto; font-size: 12px; color: var(--faint); }
 
 /* ============ 导入映射 / 预览 ============ */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
