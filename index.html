@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>检测参数质控助手</title>
+  <meta name="description" content="个人离线检测参数与质控措施查询管理工具" />
+  <meta name="theme-color" content="#1565c0" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="参数质控" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <!-- iOS 主屏幕图标必须是 PNG（iPhone 不支持 SVG 的 apple-touch-icon） -->
+  <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <div class="boot">正在加载本地数据…</div>
+  </div>
+
+  <!-- 种子数据（内联，避免 file:// 下 fetch 被拦截） -->
+  <script src="seed.js"></script>
+  <!-- Excel 解析库（已本地内置，离线可用） -->
+  <script src="vendor/xlsx.full.min.js"></script>
+  <!-- PDF 渲染库 pdf.js（本地内置；不依赖浏览器内置 PDF 插件，iOS/安卓表现一致） -->
+  <script src="vendor/pdf.min.js"></script>
+  <script src="db.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
