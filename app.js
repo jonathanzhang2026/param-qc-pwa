@@ -1196,8 +1196,40 @@
   }
 
   /* ---------- 初始化 ---------- */
+  /* 代码版本一致性自检：
+     若浏览器读到的是旧缓存里的 db.js（例如只更新了 app.js、或缓存没刷新），
+     app.js 会调用 db.js 里还不存在的新方法而白屏报错（如 DB.listCategories is not a function）。
+     这里主动检测，发现不一致就清掉旧缓存并注销 Service Worker，然后自动重载一次拿到最新代码。 */
+  async function ensureFreshRuntime() {
+    const ok = typeof DB === 'object' && DB
+      && typeof DB.listCategories === 'function'
+      && typeof DB.getMeta === 'function';
+    if (ok) return true;
+
+    const flag = 'pq_runtime_healed';
+    if (sessionStorage.getItem(flag)) { // 已自愈过一次，别再重载，避免死循环
+      $app.innerHTML = `<div class="boot">代码版本不一致：请连网后强制刷新（Ctrl+Shift+R），
+        或在手机设置里清除本站点数据后重新打开。</div>`;
+      return false;
+    }
+    sessionStorage.setItem(flag, '1');
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (e) { console.warn('清理旧缓存失败（可忽略）', e); }
+    location.reload();
+    return false;
+  }
+
   async function init() {
     $app.innerHTML = `<div class="boot">正在加载本地数据…</div>`;
+    if (!(await ensureFreshRuntime())) return;
     try { await seedIfNeeded(); } catch (e) { console.error('seed error', e); }
     try { await ensureFieldsFromSeed(); } catch (e) { console.error('ensure error', e); }
     try { const n = await migrateRecordData(); if (n) console.log('已迁移记录', n, '条'); } catch (e) { console.error('migrate error', e); }

@@ -3,7 +3,7 @@
    新增字段 = 仅往 fields 加一条，历史记录自动兼容（缺的字段显示空）。 */
 (function (global) {
   const DB_NAME = 'param_qc_db';
-  const DB_VERSION = 2; // v2：新增 pdfs（标准原文 PDF 文件，本地保存）
+  const DB_VERSION = 3; // v2：新增 pdfs；v3：新增 categories（标准库分类，可自定义）
   let _db = null;
 
   function openDB() {
@@ -22,9 +22,13 @@
         if (!db.objectStoreNames.contains('meta')) {
           db.createObjectStore('meta', { keyPath: 'k' });
         }
-        // 标准原文 PDF：{ id, name, size, blob, uploadedAt, builtin }
+        // 标准原文 PDF：{ id, name, size, blob, uploadedAt, builtin, category }
         if (!db.objectStoreNames.contains('pdfs')) {
           db.createObjectStore('pdfs', { keyPath: 'id' });
+        }
+        // 标准库分类：{ id, name, sort }
+        if (!db.objectStoreNames.contains('categories')) {
+          db.createObjectStore('categories', { keyPath: 'id' });
         }
       };
       req.onsuccess = () => { _db = req.result; resolve(_db); };
@@ -66,6 +70,13 @@
       return store('pdfs', 'readwrite').then((s) => p(s.put(doc)));
     },
     deletePdf(id) { return store('pdfs', 'readwrite').then((s) => p(s.delete(id))); },
+    /* ---- 标准库分类 ---- */
+    listCategories() {
+      return store('categories', 'readonly').then((s) => p(s.getAll()))
+        .then((a) => (a || []).sort((x, y) => (x.sort || 0) - (y.sort || 0)));
+    },
+    putCategory(c) { return store('categories', 'readwrite').then((s) => p(s.put(c))); },
+    deleteCategory(id) { return store('categories', 'readwrite').then((s) => p(s.delete(id))); },
     getMeta(k) { return store('meta', 'readonly').then((s) => p(s.get(k))).then((v) => (v ? v.v : null)); },
     setMeta(k, v) { return store('meta', 'readwrite').then((s) => p(s.put({ k, v }))); },
     // 备份恢复用：只清字段与记录；标准原文 PDF 单独保留，避免恢复数据时误删标准文件
