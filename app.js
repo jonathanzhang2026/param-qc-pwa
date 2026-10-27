@@ -195,7 +195,7 @@
       if (path === '/detail') return await detail(params.get('id'));
       if (path === '/manage') return await manage(params.get('tab') || 'records');
       if (path === '/record/edit') return await recordEdit(params.get('id'));
-      if (path === '/field/new') return await fieldEdit();
+      if (path === '/field/new') return await fieldEdit(params.get('id'));
       if (path === '/import') return await importPage();
       if (path === '/backup') return await backupPage();
       if (path === '/library') return await library();
@@ -226,6 +226,83 @@
       { label: '质控样品', keys: ['qc_qc_count', 'qc_qc_no', 'qc_true_value'] }
     ] }
   ];
+
+  /* ---------- 板块与小版块 ----------
+     四大板块由 DETAIL_SECTIONS 定义；用户新增的字段带 f.group（板块名）+ f.sub（小版块名，可空）。
+     例如 group='质控措施'、sub='加标' → 该字段出现在「质控措施 → 加标」里。 */
+  const SECTION_TITLES = DETAIL_SECTIONS.map((s) => s.title);
+  // 内置字段属于哪个小版块（由固定结构推导，让新增/编辑页与详情页口径一致）
+  const KEY_SUB = {};
+  for (const sec of DETAIL_SECTIONS) {
+    for (const it of sec.items) if (typeof it === 'object' && it.label) it.keys.forEach((k) => { KEY_SUB[k] = it.label; });
+  }
+  const subOf = (f) => (f && (f.sub || KEY_SUB[f.key])) || '';
+  // 核心字段：删了首页目录和详情标题就没了，禁止删除（可改名/换板块）
+  const isCoreField = (f) => !!f && (f.key === 'param_name' || f.key === 'method'
+    || f.name === '参数' || f.name === '方法(标准号)');
+
+  // 某个板块下可选的小版块（固定结构里定义的 + 已有字段用过的）
+  function subOptionsOf(group, fields) {
+    const out = [];
+    const sec = DETAIL_SECTIONS.find((s) => s.title === group);
+    if (sec) for (const it of sec.items) if (typeof it === 'object' && it.label && out.indexOf(it.label) < 0) out.push(it.label);
+    for (const f of fields || []) if (f.group === group && f.sub && out.indexOf(f.sub) < 0) out.push(f.sub);
+    return out;
+  }
+
+  // 动态拼出详情页要显示的板块：固定结构在前，用户新增字段按 sub 插进对应小版块
+  function buildDetailSections(fields, excludeKeys) {
+    const fixedKeys = new Set();
+    for (const sec of DETAIL_SECTIONS) {
+      for (const it of sec.items) {
+        if (typeof it === 'string') fixedKeys.add(it);
+        else it.keys.forEach((k) => fixedKeys.add(k));
+      }
+    }
+    for (const k of excludeKeys || []) fixedKeys.add(k); // 如「参数 / 方法」，已在详情头部显示，不在板块里重复
+    const extras = (fields || []).filter((f) => !f.hidden && !fixedKeys.has(f.key));
+    const pack = (list) => { // 把一批字段按 sub 排成 [{label?,keys}]
+      const items = [];
+      for (const f of list) {
+        if (!f.sub) { items.push({ keys: [f.key] }); continue; }
+        let t = items.find((i) => i.label === f.sub);
+        if (!t) { t = { label: f.sub, keys: [] }; items.push(t); }
+        t.keys.push(f.key);
+      }
+      return items;
+    };
+    const out = [];
+    for (const sec of DETAIL_SECTIONS) {
+      const items = sec.items.map((it) => (typeof it === 'string' ? { keys: [it] } : { label: it.label, keys: it.keys.slice() }));
+      const mine = extras.filter((f) => f.group === sec.title);
+      for (const it of pack(mine)) {
+        if (it.label) { // 已有同名小版块就并入，否则追加到板块末尾
+          const t = items.find((i) => i.label === it.label);
+          if (t) t.keys = t.keys.concat(it.keys); else items.push(it);
+        } else items.push(it);
+      }
+      out.push({ title: sec.title, items });
+    }
+    const others = extras.filter((f) => SECTION_TITLES.indexOf(f.group) < 0);
+    if (others.length) out.push({ title: '其他信息', items: pack(others) });
+    return out;
+  }
+
+  /* ---------- 删除字段：同时记住"别再被种子补回来" ---------- */
+  async function countFieldUsage(key) {
+    const recs = await DB.getAllRecords();
+    return (recs || []).filter((r) => {
+      const v = r && r.data ? r.data[key] : undefined;
+      if (v == null) return false;
+      if (Array.isArray(v)) return v.length > 0;
+      return String(v).trim() !== '';
+    }).length;
+  }
+  async function deleteFieldSafely(key) {
+    await DB.deleteField(key);
+    const del = (await DB.getMeta('deletedFields')) || [];
+    if (del.indexOf(key) < 0) { del.push(key); await DB.setMeta('deletedFields', del); }
+  }
 
   /* ---------- 主页面：参数→方法 两级折叠目录 ---------- */
   async function home() {
@@ -538,16 +615,15 @@
     }
 
     let sectionsHtml = '';
-    for (const sec of DETAIL_SECTIONS) {
+    // 四大板块 + 用户新增字段（新增字段按所属小版块插进去，没有小版块的平铺在板块末尾）
+    for (const sec of buildDetailSections(fields, [paramKey, methodKey])) {
       let body = '';
       for (const it of sec.items) {
-        if (typeof it === 'string') {
-          body += fieldRows([it]);
-        } else {
-          const inner = fieldRows(it.keys);
-          // 子板块：小标题 + 平铺字段（无背景色块）
-          if (inner) body += `<div class="sub-label">${esc(it.label)}</div>${inner}`;
-        }
+        const inner = fieldRows(it.keys);
+        if (!inner) continue;
+        // 小版块：小标题 + 平铺字段（无背景色块）
+        if (it.label) body += `<div class="sub-label">${esc(it.label)}</div>${inner}`;
+        else body += inner;
       }
       if (!body) continue;
       sectionsHtml += `<div class="group">
@@ -750,10 +826,37 @@
           if (!fs.length) return '';
           return `<div class="group">
           <div class="group-title">${esc(g.group)}</div>
-          ${fs.map((f) => `<div class="field-row"><div class="field-label">${esc(f.name)}${f.unit ? ' (' + esc(f.unit) + ')' : ''}</div><div class="field-value">${esc(TYPE_LABEL[f.type] || f.type || '文本')}${f.filterable ? ' · 可筛选' : ''}</div></div>`).join('')}
+          ${fs.map((f) => `<div class="row field-manage-row" data-key="${esc(f.key)}">
+            <div class="row-main">
+              <div class="row-title">${esc(f.name)}${f.unit ? ' <span class="unit">(' + esc(f.unit) + ')</span>' : ''}</div>
+              <div class="row-sub">${esc(TYPE_LABEL[f.type] || f.type || '文本')}${subOf(f) ? ' · ' + esc(subOf(f)) : ''}${f.filterable ? ' · 可筛选' : ''}</div>
+            </div>
+            <button class="row-del" data-fdel="${esc(f.key)}" aria-label="删除字段">🗑</button>
+          </div>`).join('')}
         </div>`;}).join('')}
-        <p class="hint">新增字段不会破坏历史记录；历史记录中该字段显示为空，可在编辑时补填。</p>`;
+        <p class="hint">点某一行可改名 / 换板块 / 换小版块；点 🗑 删除字段。删除只移除字段本身，记录里已填的内容不会被清掉（只是不再显示）。</p>`;
       body.querySelector('[data-act="add"]').addEventListener('click', () => go('/field/new'));
+      // 点行 = 编辑该字段（改名称 / 归属 / 单位 / 选项）
+      body.querySelectorAll('.field-manage-row').forEach((row) =>
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('[data-fdel]')) return;
+          go('/field/new?id=' + encodeURIComponent(row.dataset.key));
+        }));
+      body.querySelectorAll('[data-fdel]').forEach((b) =>
+        b.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const f = fields.find((x) => x.key === b.dataset.fdel);
+          if (!f) return;
+          if (isCoreField(f)) { toast('「' + f.name + '」是核心字段，不能删除'); return; }
+          const used = await countFieldUsage(f.key);
+          const msg = '删除字段「' + f.name + '」？'
+            + (used ? '\n有 ' + used + ' 条记录填过这个字段，删除后这些内容不再显示（记录本身不删）。' : '')
+            + '\n删除后可在「＋ 新增字段」里重新加回来。';
+          if (!confirm(msg)) return;
+          await deleteFieldSafely(f.key);
+          toast('已删除字段：' + f.name);
+          manage('fields');
+        }));
     } else if (tab === 'import') {
       body.innerHTML = `<div class="pad"><p class="hint">在「数据导入」页选择本页签下方的入口，或点下方按钮开始导入 Excel/CSV。</p>
         <button class="btn btn-primary block" data-act="go">开始导入</button></div>`;
@@ -872,6 +975,17 @@
     const data = (rec && rec.data) || {};
     const visible = fields.filter((f) => !f.hidden); // 旧字段已隐藏，不再出现在表单里
     const groups = groupFields(visible);
+    // 板块内按小版块再分一层（如 质控措施 → 平行 / 加标 / 校核点），与详情页结构一致
+    function splitBySub(fs) {
+      const out = [];
+      for (const f of fs) {
+        const s = subOf(f);
+        let t = out.find((x) => x.sub === s);
+        if (!t) { t = { sub: s, fields: [] }; out.push(t); }
+        t.fields.push(f);
+      }
+      return out;
+    }
 
     // 多行配对里的一行（如 保存方式 / 保存时效）
     function pairRow(subs, r) {
@@ -932,7 +1046,7 @@
       <form id="form" class="form">
         ${groups.map((g) => `<div class="group">
           <div class="group-title">${esc(g.group)}</div>
-          ${g.fields.map(formField).join('')}
+          ${splitBySub(g.fields).map((sg) => (sg.sub ? `<div class="sub-label">${esc(sg.sub)}</div>` : '') + sg.fields.map(formField).join('')).join('')}
           ${(g.group === '基本信息' || g.group === '基础信息') ? `
           <div class="form-row">
             <label class="label">标准原文（PDF）</label>
@@ -1063,60 +1177,142 @@
   }
 
   /* ---------- 字段新增 ---------- */
-  async function fieldEdit() {
+  /* ---------- 新增 / 编辑字段 ----------
+     新增字段可以指定：四大板块（基本信息/样品信息/标准曲线/质控措施）+ 板块内的小版块（如 加标、校核点），
+     也可以选「不分子版块」直接放在板块下，或现场新建一个小版块。 */
+  async function fieldEdit(id) {
     const fields = await DB.getAllFields();
-    const groups = [...new Set(fields.map((f) => f.group))];
+    const cur = id ? fields.find((f) => f.key === id) : null;
+    const editing = !!cur;
+    const knownGroups = [...new Set(fields.map((f) => f.group).filter(Boolean))];
+    const groupList = SECTION_TITLES.concat(knownGroups.filter((g) => SECTION_TITLES.indexOf(g) < 0));
+    const curGroup = cur ? (cur.group || '其他信息') : '基本信息';
+    const curSub = cur ? (cur.sub || '') : '';
+    const curType = cur ? (cur.type || 'text') : 'text';
+    const curExtra = cur
+      ? (cur.type === 'multiselect' ? (cur.options || []).join(',')
+        : cur.type === 'pairs' ? (cur.subs || []).map((s) => s.label).join(',') : '')
+      : '';
+
+    function subOptionsHtml(group, sel) {
+      const list = subOptionsOf(group, fields);
+      return `<option value=""${sel ? '' : ' selected'}>（不分子版块，直接放在板块下）</option>`
+        + list.map((s) => `<option value="${esc(s)}"${s === sel ? ' selected' : ''}>${esc(s)}</option>`).join('')
+        + '<option value="__new__">＋ 新建小版块…</option>';
+    }
+
     $app.innerHTML = `
-      ${appbar('新增字段', true)}
+      ${appbar(editing ? '编辑字段' : '新增字段', true)}
       <form id="form" class="form">
-        <div class="form-row"><label class="label">字段名称 *</label><input class="input" name="name" required placeholder="如：前处理方法" /></div>
-        <div class="form-row"><label class="label">分组</label>
-          <input class="input" name="group" list="grouplist" placeholder="如：基本信息 / 样品信息" />
-          <datalist id="grouplist">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
+        <div class="form-row"><label class="label">字段名称 *</label><input class="input" name="name" required
+          placeholder="如：前处理方法" value="${esc(cur ? cur.name : '')}" /></div>
+        <div class="form-row"><label class="label">所属板块</label>
+          <select class="input" id="fGroup">
+            ${groupList.map((g) => `<option value="${esc(g)}"${g === curGroup ? ' selected' : ''}>${esc(g)}</option>`).join('')}
+            <option value="__new__">＋ 新建板块…</option>
+          </select>
         </div>
-        <div class="form-row"><label class="label">类型</label>
+        <div class="form-row"><label class="label">板块内的小版块</label>
+          <select class="input" id="fSub" name="sub">${subOptionsHtml(curGroup, curSub)}</select>
+          <div class="hint" style="margin:6px 0 0">例：板块选「质控措施」，小版块选「加标」，该字段就会出现在详情页「质控措施 → 加标」里。</div>
+        </div>
+        ${editing ? `<div class="form-row"><label class="label">类型</label>
+          <div class="input input-static">${esc(TYPE_LABEL[curType] || curType)}（已存数据，不支持改类型）</div></div>`
+        : `<div class="form-row"><label class="label">类型</label>
           <select class="input" name="type">
             <option value="text">文本</option><option value="number">数字</option>
             <option value="date">日期</option><option value="select">单选</option>
             <option value="multiselect">多选（可勾选多个）</option>
             <option value="pairs">多行配对（表格，如 方式/时效）</option>
-          </select>
-        </div>
+          </select></div>`}
+        ${(!editing || curType === 'select' || curType === 'multiselect' || curType === 'pairs') ? `
         <div class="form-row"><label class="label">选项 / 子字段</label>
-          <input class="input" name="extra" placeholder="多选填选项；多行配对填子字段名，逗号分隔" />
+          <input class="input" name="extra" placeholder="多选填选项；多行配对填子字段名，逗号分隔" value="${esc(curExtra)}" />
           <div class="hint" style="margin:6px 0 0">例：多选填「地表水,地下水,工业废水」；多行配对填「保存方式,保存时效」</div>
-        </div>
-        <div class="form-row"><label class="label">单位（可选）</label><input class="input" name="unit" placeholder="如：mg/L" /></div>
-        <div class="form-row check"><label><input type="checkbox" name="filterable" /> 参与首页筛选</label></div>
+        </div>` : ''}
+        <div class="form-row"><label class="label">单位（可选）</label><input class="input" name="unit"
+          placeholder="如：mg/L" value="${esc(cur ? (cur.unit || '') : '')}" /></div>
+        <div class="form-row check"><label><input type="checkbox" name="filterable" ${cur && cur.filterable ? 'checked' : ''} /> 参与首页筛选</label></div>
         <div class="actions">
           <button type="submit" class="btn btn-primary">保存</button>
+          ${editing ? `<button type="button" class="btn btn-danger" data-act="del">删除该字段</button>` : ''}
           <button type="button" class="btn" data-act="cancel">取消</button>
         </div>
       </form>`;
     $app.querySelector('[data-act="back"]').addEventListener('click', () => go('/manage?tab=fields'));
     $app.querySelector('[data-act="cancel"]').addEventListener('click', () => go('/manage?tab=fields'));
+
+    const groupSel = $app.querySelector('#fGroup');
+    const subSel = $app.querySelector('#fSub');
+    groupSel.addEventListener('change', async () => {
+      let g = groupSel.value;
+      if (g === '__new__') {
+        g = (prompt('新板块名称：') || '').trim();
+        if (!g) { groupSel.value = curGroup; return; }
+        if (groupList.indexOf(g) < 0) {
+          groupSel.insertBefore(new Option(g, g), groupSel.lastChild);
+        }
+        groupSel.value = g;
+      }
+      subSel.innerHTML = subOptionsHtml(g, '');
+    });
+    // 选「＋ 新建小版块…」时现场起名
+    subSel.addEventListener('change', () => {
+      if (subSel.value !== '__new__') return;
+      const s = (prompt('新小版块名称：', '') || '').trim();
+      if (!s) { subSel.value = ''; return; }
+      const opt = new Option(s, s);
+      subSel.insertBefore(opt, subSel.lastChild);
+      subSel.value = s;
+    });
+
+    const delBtn = $app.querySelector('[data-act="del"]');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      if (isCoreField(cur)) { toast('「' + cur.name + '」是核心字段，不能删除'); return; }
+      const used = await countFieldUsage(cur.key);
+      const msg = '删除字段「' + cur.name + '」？'
+        + (used ? '\n有 ' + used + ' 条记录填过这个字段，删除后这些内容不再显示（记录本身不删）。' : '');
+      if (!confirm(msg)) return;
+      await deleteFieldSafely(cur.key);
+      toast('已删除字段'); go('/manage?tab=fields');
+    });
+
     $app.querySelector('#form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
       const name = (fd.get('name') || '').toString().trim();
       if (!name) { toast('请填写字段名称'); return; }
-      const key = 'f_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
-      const sort = (fields.reduce((m, f) => Math.max(m, f.sort || 0), 0)) + 1;
-      const type = fd.get('type') || 'text';
+      let group = (fd.get('group') || groupSel.value || '').toString().trim();
+      if (group === '__new__') group = (prompt('新板块名称：') || '').trim() || '其他信息';
+      let sub = (fd.get('sub') || '').toString().trim();
+      if (sub === '__new__') sub = (prompt('新小版块名称：') || '').trim();
       const list = ((fd.get('extra') || '').toString())
         .split(/[,，]/).map((s) => s.trim()).filter(Boolean);
-      const f = {
-        key, name,
-        group: (fd.get('group') || '').toString().trim() || '其他',
-        type,
+      const type = editing ? curType : (fd.get('type') || 'text');
+
+      const base = {
+        name,
+        group: group || '其他信息',
+        sub: sub || '',
         unit: (fd.get('unit') || '').toString().trim(),
-        filterable: !!fd.get('filterable'),
-        sort
+        filterable: !!fd.get('filterable')
       };
-      if (type === 'multiselect') f.options = list;
-      if (type === 'pairs') f.subs = list.map((s, i) => ({ k: 'c' + (i + 1), label: s }));
-      await DB.putField(f);
-      toast('字段已添加'); go('/manage?tab=fields');
+      if (editing) {
+        const next = Object.assign({}, cur, base, { type: curType });
+        if (curType === 'select' || curType === 'multiselect') next.options = list;
+        if (curType === 'pairs') next.subs = list.map((s, i) => ({ k: 'c' + (i + 1), label: s }));
+        await DB.putField(next);
+        toast('字段已更新');
+      } else {
+        const key = 'f_' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
+        const sort = (fields.reduce((m, f) => Math.max(m, f.sort || 0), 0)) + 1;
+        const f = Object.assign({ key, type, sort }, base);
+        if (type === 'multiselect') f.options = list;
+        if (type === 'pairs') f.subs = list.map((s, i) => ({ k: 'c' + (i + 1), label: s }));
+        await DB.putField(f);
+        toast('字段已添加');
+      }
+      go('/manage?tab=fields');
     });
   }
 
@@ -1305,7 +1501,9 @@
   async function ensureFieldsFromSeed() {
     const existing = await DB.getAllFields();
     const have = new Set(existing.map((f) => f.key));
+    const deleted = new Set((await DB.getMeta('deletedFields')) || []); // 用户删掉的字段不再补回来
     for (const sf of ((window.SEED_DATA || {}).fields || [])) {
+      if (deleted.has(sf.key)) continue;
       if (!have.has(sf.key)) { await DB.putField(Object.assign({}, sf)); continue; }
       // 已存在但定义变了（如「适用类型」由文本改为多选）→ 以种子为准更新定义
       const cur = existing.find((f) => f.key === sf.key);

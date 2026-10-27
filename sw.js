@@ -1,6 +1,6 @@
 // 离线缓存：首次联网加载后，断网也能打开使用（数据存在 IndexedDB，不在此缓存）。
 // 设计要点：联网时所有请求网络优先（永远拿到最新代码），失败才回退缓存；安装容错（单个资源失败不致命）；新版本自动接管。
-const CACHE = 'param-qc-v17';
+const CACHE = 'param-qc-v18';
 const ASSETS = [
   './',
   'index.html',
