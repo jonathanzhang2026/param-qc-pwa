@@ -304,6 +304,28 @@
     if (del.indexOf(key) < 0) { del.push(key); await DB.setMeta('deletedFields', del); }
   }
 
+  /* ---------- 字段排序：与相邻字段交换 sort ----------
+     影响详情页（同一小版块内的字段先后）与录入表单（板块内的字段先后）。
+     跨板块不在这里挪，避免"顺序"和"归属"两件事混在一起——换板块请走编辑。 */
+  async function moveField(key, dir) {
+    const list = (await DB.getAllFields()).slice().sort((a, b) => (a.sort || 0) - (b.sort || 0));
+    const vals = list.map((f) => f.sort);
+    if (vals.some((v) => v == null) || new Set(vals).size !== vals.length) {
+      // sort 缺失或重复时先整体重排一次，保证后面的交换一定生效
+      list.forEach((f, i) => { f.sort = i; });
+      await Promise.all(list.map((f) => DB.putField(f)));
+    }
+    const idx = list.findIndex((f) => f.key === key);
+    const t = idx + (dir === 'up' ? -1 : 1);
+    if (idx < 0 || t < 0 || t >= list.length) { toast('已经在最' + (dir === 'up' ? '前' : '后') + '了'); return false; }
+    const cur = list[idx], other = list[t];
+    if ((cur.group || '') !== (other.group || '')) { toast('只能在同一个板块内调顺序；要换板块请点 ✎ 编辑'); return false; }
+    const tmp = cur.sort; cur.sort = other.sort; other.sort = tmp;
+    await DB.putField(cur);
+    await DB.putField(other);
+    return true;
+  }
+
   /* ---------- 主页面：参数→方法 两级折叠目录 ---------- */
   async function home() {
     const [fields, records, lib] = await Promise.all([
@@ -610,8 +632,13 @@
       return `<div class="field-row"><div class="field-label">${esc(f.name)}</div><div class="field-value">${valHtml(rec.data[f.key])}</div></div>`;
     }
 
+    // fields 已按 sort 升序，用下标即可让「字段管理」里调的顺序在这里生效
+    const order = {};
+    fields.forEach((f, i) => { order[f.key] = i; });
     function fieldRows(keys) {
-      return keys.map((k) => (fByKey[k] ? renderField(fByKey[k]) : '')).join('');
+      return keys.slice()
+        .sort((a, b) => (order[a] == null ? 9999 : order[a]) - (order[b] == null ? 9999 : order[b]))
+        .map((k) => (fByKey[k] ? renderField(fByKey[k]) : '')).join('');
     }
 
     let sectionsHtml = '';
@@ -826,22 +853,37 @@
           if (!fs.length) return '';
           return `<div class="group">
           <div class="group-title">${esc(g.group)}</div>
-          ${fs.map((f) => `<div class="row field-manage-row" data-key="${esc(f.key)}">
+          ${fs.map((f, i) => `<div class="row field-manage-row" data-key="${esc(f.key)}">
             <div class="row-main">
               <div class="row-title">${esc(f.name)}${f.unit ? ' <span class="unit">(' + esc(f.unit) + ')</span>' : ''}</div>
               <div class="row-sub">${esc(TYPE_LABEL[f.type] || f.type || '文本')}${subOf(f) ? ' · ' + esc(subOf(f)) : ''}${f.filterable ? ' · 可筛选' : ''}</div>
             </div>
+            <button class="row-move" data-fup="${esc(f.key)}" ${i === 0 ? 'disabled' : ''} aria-label="上移">↑</button>
+            <button class="row-move" data-fdown="${esc(f.key)}" ${i === fs.length - 1 ? 'disabled' : ''} aria-label="下移">↓</button>
+            <button class="row-edit" data-fedit="${esc(f.key)}" aria-label="编辑字段">✎</button>
             <button class="row-del" data-fdel="${esc(f.key)}" aria-label="删除字段">🗑</button>
           </div>`).join('')}
         </div>`;}).join('')}
-        <p class="hint">点某一行可改名 / 换板块 / 换小版块；点 🗑 删除字段。删除只移除字段本身，记录里已填的内容不会被清掉（只是不再显示）。</p>`;
+        <p class="hint">✎（或点整行）改名 / 换板块 / 换小版块；↑↓ 调显示顺序（同一板块内上下移动，详情页与录入表单都会跟着变）；🗑 删除字段——只移除字段本身，记录里已填的内容不会被清掉（只是不再显示）。</p>`;
       body.querySelector('[data-act="add"]').addEventListener('click', () => go('/field/new'));
-      // 点行 = 编辑该字段（改名称 / 归属 / 单位 / 选项）
+      // 点行 / ✎ = 编辑该字段（改名称 / 归属 / 单位 / 选项）
+      const openField = (key) => go('/field/new?id=' + encodeURIComponent(key));
       body.querySelectorAll('.field-manage-row').forEach((row) =>
         row.addEventListener('click', (e) => {
-          if (e.target.closest('[data-fdel]')) return;
-          go('/field/new?id=' + encodeURIComponent(row.dataset.key));
+          if (e.target.closest('button')) return;
+          openField(row.dataset.key);
         }));
+      body.querySelectorAll('[data-fedit]').forEach((b) =>
+        b.addEventListener('click', (e) => { e.stopPropagation(); openField(b.dataset.fedit); }));
+      // 排序：与相邻字段交换 sort（只在同一板块内）
+      const moveBtns = (sel, dir) => body.querySelectorAll(sel).forEach((b) =>
+        b.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const ok = await moveField(b.dataset[dir === 'up' ? 'fup' : 'fdown'], dir);
+          if (ok) { toast(dir === 'up' ? '已上移' : '已下移'); manage('fields'); }
+        }));
+      moveBtns('[data-fup]', 'up');
+      moveBtns('[data-fdown]', 'down');
       body.querySelectorAll('[data-fdel]').forEach((b) =>
         b.addEventListener('click', async (e) => {
           e.stopPropagation();
