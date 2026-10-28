@@ -304,26 +304,113 @@
     if (del.indexOf(key) < 0) { del.push(key); await DB.setMeta('deletedFields', del); }
   }
 
-  /* ---------- 字段排序：与相邻字段交换 sort ----------
+  /* ---------- 字段排序：按住拖动 ----------
      影响详情页（同一小版块内的字段先后）与录入表单（板块内的字段先后）。
-     跨板块不在这里挪，避免"顺序"和"归属"两件事混在一起——换板块请走编辑。 */
-  async function moveField(key, dir) {
-    const list = (await DB.getAllFields()).slice().sort((a, b) => (a.sort || 0) - (b.sort || 0));
-    const vals = list.map((f) => f.sort);
-    if (vals.some((v) => v == null) || new Set(vals).size !== vals.length) {
-      // sort 缺失或重复时先整体重排一次，保证后面的交换一定生效
-      list.forEach((f, i) => { f.sort = i; });
-      await Promise.all(list.map((f) => DB.putField(f)));
-    }
-    const idx = list.findIndex((f) => f.key === key);
-    const t = idx + (dir === 'up' ? -1 : 1);
-    if (idx < 0 || t < 0 || t >= list.length) { toast('已经在最' + (dir === 'up' ? '前' : '后') + '了'); return false; }
-    const cur = list[idx], other = list[t];
-    if ((cur.group || '') !== (other.group || '')) { toast('只能在同一个板块内调顺序；要换板块请点 ✎ 编辑'); return false; }
-    const tmp = cur.sort; cur.sort = other.sort; other.sort = tmp;
-    await DB.putField(cur);
-    await DB.putField(other);
+     只在同一个板块内拖；换板块归属请走 ✎ 编辑——"顺序"和"归属"是两件事。 */
+  async function reorderFields(keys) {
+    const all = await DB.getAllFields();
+    const set = new Set(keys);
+    const slots = [];
+    all.forEach((f, i) => { if (set.has(f.key)) slots.push(i); });
+    if (slots.length !== keys.length) return false; // 列表已过期，交给下次渲染
+    const byKey = new Map(all.map((f) => [f.key, f]));
+    slots.forEach((idx, n) => { all[idx] = byKey.get(keys[n]); });
+    // 按顺序重写 sort，其他板块的相对次序不受影响
+    await Promise.all(all.map((f, i) => (f.sort === i ? null : DB.putField(Object.assign({}, f, { sort: i })))));
     return true;
+  }
+
+  // 拖动结束后紧跟着的那次 click 要吃掉，否则手指一松就跳进编辑页
+  let suppressRowClick = false;
+
+  /* 按住 ☰ 拖动排序；长按整行（约 0.3 秒）也能进入拖动态。
+     同时支持触摸与鼠标（Pointer Events）；拖动时禁止页面跟着滚。 */
+  function bindFieldDrag(box) {
+    let st = null;         // 拖拽状态
+    let timer = null;      // 长按计时
+    let downY = 0;
+
+    const rowsNow = () => Array.from(box.querySelectorAll('.field-manage-row'));
+
+    function start(row, y, pid) {
+      const list = rowsNow();
+      const from = list.indexOf(row);
+      if (from < 0 || list.length < 2) return;
+      const rects = list.map((r) => ({ el: r, top: r.offsetTop, h: r.offsetHeight }));
+      const rowH = rects[from].h;
+      const gap = rects.length > 1 ? (rects[1].top - rects[0].top - rects[0].h) : 0;
+      // 把被拖行拿掉后，其余行依次堆叠的新位置 → 得到它们各自的位移
+      const others = rects.filter((_, i) => i !== from);
+      const slotTop = [];
+      let pos = rects[0].top;
+      others.forEach((o) => { slotTop.push(pos); pos += o.h + gap; });
+      const shifts = others.map((o, j) => ({ el: o.el, dy: slotTop[j] - o.top }));
+      // 每个候选落点（插在第 k 位）的中心，用来判断松手后落在哪：取离手指最近的落点
+      const centers = [];
+      for (let k = 0; k <= others.length; k++) {
+        const top = k === 0 ? slotTop[0] : slotTop[k - 1] + others[k - 1].h + gap;
+        centers.push(top + rowH / 2);
+      }
+      row.classList.add('dragging');
+      box.classList.add('dragging-on');
+      st = { row, from, to: from, y0: y, top0: rects[from].top, rowH, gap, shifts, centers, moved: false };
+      try { row.setPointerCapture(pid); } catch (_) { /* 老浏览器忽略 */ }
+      if (navigator.vibrate) { try { navigator.vibrate(12); } catch (_) {} }
+    }
+
+    function onMove(e) {
+      if (!st) return;
+      const dy = e.clientY - st.y0;
+      if (Math.abs(dy) > 3) st.moved = true;
+      st.row.style.transform = 'translateY(' + dy + 'px)';
+      const center = st.top0 + st.rowH / 2 + dy; // 被拖行当前中心
+      let best = st.from, bestD = Infinity;
+      for (let k = 0; k < st.centers.length; k++) {
+        const d = Math.abs(st.centers[k] - center);
+        if (d < bestD) { bestD = d; best = k; }
+      }
+      st.to = best;
+      st.shifts.forEach((s, j) => {
+        s.el.style.transform = 'translateY(' + (j >= st.to ? s.dy + st.rowH + st.gap : s.dy) + 'px)';
+      });
+    }
+
+    async function finish() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!st) return;
+      const { row, from, to, moved } = st;
+      st = null;
+      row.classList.remove('dragging');
+      box.classList.remove('dragging-on');
+      const list = rowsNow();
+      list.forEach((r) => { r.style.transform = ''; });
+      if (moved) { suppressRowClick = true; setTimeout(() => { suppressRowClick = false; }, 350); }
+      if (to === from) return;
+      const rest = list.filter((r) => r !== row);
+      rest.splice(to, 0, row);
+      rest.forEach((r) => box.appendChild(r)); // 立刻落到新位置，避免整页重绘闪一下
+      const ok = await reorderFields(rest.map((r) => r.dataset.key));
+      toast(ok ? '顺序已保存' : '列表已变化，请重新打开');
+    }
+
+    rowsNow().forEach((row) => {
+      row.addEventListener('pointerdown', (e) => {
+        if (e.button != null && e.button > 0) return;
+        const btn = e.target.closest ? e.target.closest('button') : null;
+        if (btn && !btn.classList.contains('row-drag')) return; // ✎ / 🗑 不触发拖动
+        downY = e.clientY;
+        if (btn && btn.classList.contains('row-drag')) start(row, e.clientY, e.pointerId);
+        else timer = setTimeout(() => { timer = null; start(row, downY, e.pointerId); }, 300);
+      });
+      row.addEventListener('pointermove', (e) => {
+        if (st) { onMove(e); return; }
+        if (timer && Math.abs(e.clientY - downY) > 10) { clearTimeout(timer); timer = null; } // 判定为滚动
+      });
+      row.addEventListener('pointerup', finish);
+      row.addEventListener('pointercancel', finish);
+    });
+    // 拖动过程中别让页面跟着滚（iOS 需要非被动监听）
+    box.addEventListener('touchmove', (e) => { if (st) e.preventDefault(); }, { passive: false });
   }
 
   /* ---------- 主页面：参数→方法 两级折叠目录 ---------- */
@@ -853,37 +940,32 @@
           if (!fs.length) return '';
           return `<div class="group">
           <div class="group-title">${esc(g.group)}</div>
-          ${fs.map((f, i) => `<div class="row field-manage-row" data-key="${esc(f.key)}">
+          <div class="drag-box">
+          ${fs.map((f) => `<div class="row field-manage-row" data-key="${esc(f.key)}">
+            <button type="button" class="row-drag" aria-label="按住拖动排序">☰</button>
             <div class="row-main">
               <div class="row-title">${esc(f.name)}${f.unit ? ' <span class="unit">(' + esc(f.unit) + ')</span>' : ''}</div>
               <div class="row-sub">${esc(TYPE_LABEL[f.type] || f.type || '文本')}${subOf(f) ? ' · ' + esc(subOf(f)) : ''}${f.filterable ? ' · 可筛选' : ''}</div>
             </div>
-            <button class="row-move" data-fup="${esc(f.key)}" ${i === 0 ? 'disabled' : ''} aria-label="上移">↑</button>
-            <button class="row-move" data-fdown="${esc(f.key)}" ${i === fs.length - 1 ? 'disabled' : ''} aria-label="下移">↓</button>
             <button class="row-edit" data-fedit="${esc(f.key)}" aria-label="编辑字段">✎</button>
             <button class="row-del" data-fdel="${esc(f.key)}" aria-label="删除字段">🗑</button>
           </div>`).join('')}
+          </div>
         </div>`;}).join('')}
-        <p class="hint">✎（或点整行）改名 / 换板块 / 换小版块；↑↓ 调显示顺序（同一板块内上下移动，详情页与录入表单都会跟着变）；🗑 删除字段——只移除字段本身，记录里已填的内容不会被清掉（只是不再显示）。</p>`;
+        <p class="hint">按住行首的 ☰ 上下拖动即可调整顺序（长按整行也能拖），松开手指自动保存——只在本板块内调，详情页与录入表单都会跟着变；想换板块请点 ✎。<br />✎（或点整行）改名 / 换板块 / 换小版块；🗑 删除字段——只移除字段本身，记录里已填的内容不会被清掉（只是不再显示）。</p>`;
       body.querySelector('[data-act="add"]').addEventListener('click', () => go('/field/new'));
       // 点行 / ✎ = 编辑该字段（改名称 / 归属 / 单位 / 选项）
       const openField = (key) => go('/field/new?id=' + encodeURIComponent(key));
       body.querySelectorAll('.field-manage-row').forEach((row) =>
         row.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
+          if (suppressRowClick) { suppressRowClick = false; return; } // 刚拖完，不算点击
           openField(row.dataset.key);
         }));
       body.querySelectorAll('[data-fedit]').forEach((b) =>
         b.addEventListener('click', (e) => { e.stopPropagation(); openField(b.dataset.fedit); }));
-      // 排序：与相邻字段交换 sort（只在同一板块内）
-      const moveBtns = (sel, dir) => body.querySelectorAll(sel).forEach((b) =>
-        b.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const ok = await moveField(b.dataset[dir === 'up' ? 'fup' : 'fdown'], dir);
-          if (ok) { toast(dir === 'up' ? '已上移' : '已下移'); manage('fields'); }
-        }));
-      moveBtns('[data-fup]', 'up');
-      moveBtns('[data-fdown]', 'down');
+      // 排序：按住 ☰（或长按整行）上下拖动
+      body.querySelectorAll('.drag-box').forEach((box) => bindFieldDrag(box));
       body.querySelectorAll('[data-fdel]').forEach((b) =>
         b.addEventListener('click', async (e) => {
           e.stopPropagation();
