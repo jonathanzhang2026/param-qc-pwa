@@ -190,6 +190,8 @@
 
   async function render() {
     const { path, params } = route();
+    // 切换视图（导航）时把页面滚动归零，避免从详情页中间的滚动位置进入编辑页
+    window.scrollTo(0, 0);
     try {
       if (path === '/' || path === '') return await home();
       if (path === '/detail') return await detail(params.get('id'));
