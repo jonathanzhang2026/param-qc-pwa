@@ -1135,10 +1135,15 @@
       }
       if (f.type === 'multiselect') {
         const arr = Array.isArray(val) ? val : (String(val == null ? '' : val).trim() ? [String(val).trim()] : []);
+        // 选项 = 字段定义的选项 ∪ 本条已存的值。
+        // 这样即使字段选项被改动，已保存的值仍能显示并被勾选，点「保存」也不会丢失。
+        const optSet = new Set(f.options || []);
+        arr.forEach((v) => { if (v != null && String(v).trim()) optSet.add(v); });
+        const optList = [...optSet];
         return `<div class="form-row">
           <label class="label">${esc(f.name)}</label>
           <div class="checks">
-            ${(f.options || []).map((o) => `<label class="chk${arr.indexOf(o) >= 0 ? ' on' : ''}">
+            ${optList.map((o) => `<label class="chk${arr.indexOf(o) >= 0 ? ' on' : ''}">
               <input type="checkbox" name="ms_${esc(f.key)}" value="${esc(o)}" ${arr.indexOf(o) >= 0 ? 'checked' : ''} />
               <span>${esc(o)}</span></label>`).join('')}
           </div>
@@ -1621,26 +1626,17 @@
     });
   }
 
-  /* ---------- 字段补齐：保证种子里的新字段也进入已有库 ---------- */
+  /* ---------- 字段补齐：保证种子里的新字段也进入已有库 ----------
+     注意：只在字段「完全不存在」时补种子。已存在的字段（无论内置还是用户自建）
+     一律以当前库里的定义为准，绝不用种子回写——否则用户给多选字段新增的选项、
+     改名、换板块等都会被清掉（之前就因此把「适用类型」新增的选项刷没了）。 */
   async function ensureFieldsFromSeed() {
     const existing = await DB.getAllFields();
     const have = new Set(existing.map((f) => f.key));
     const deleted = new Set((await DB.getMeta('deletedFields')) || []); // 用户删掉的字段不再补回来
     for (const sf of ((window.SEED_DATA || {}).fields || [])) {
       if (deleted.has(sf.key)) continue;
-      if (!have.has(sf.key)) { await DB.putField(Object.assign({}, sf)); continue; }
-      // 已存在但定义变了（如「适用类型」由文本改为多选）→ 以种子为准更新定义
-      const cur = existing.find((f) => f.key === sf.key);
-      const same = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
-      // 定义变了（改名 / 改板块 / 改类型 / 上下线）→ 以种子为准更新，历史数据不丢
-      if (cur && (cur.type !== sf.type || !!cur.hidden !== !!sf.hidden
-        || cur.name !== sf.name || cur.group !== sf.group
-        || !same(cur.subs, sf.subs) || !same(cur.options, sf.options))) {
-        await DB.putField(Object.assign({}, cur, {
-          name: sf.name, group: sf.group,
-          type: sf.type, subs: sf.subs, options: sf.options, hidden: !!sf.hidden
-        }));
-      }
+      if (!have.has(sf.key)) await DB.putField(Object.assign({}, sf)); // 缺失才补，已存在则不动
     }
   }
 
